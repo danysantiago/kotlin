@@ -41,6 +41,7 @@ import com.sun.jdi.ClassType
 import javaslang.control.Either
 import org.jetbrains.kotlin.idea.debugger.AsyncStackTraceContext
 import org.jetbrains.kotlin.idea.debugger.KotlinCoroutinesAsyncStackTraceProvider
+import org.jetbrains.kotlin.idea.debugger.coroutines.panel.RefreshCoroutinesTreeCommand
 import org.jetbrains.kotlin.idea.debugger.evaluate.ExecutionContext
 import java.awt.event.MouseEvent
 import java.lang.ref.WeakReference
@@ -52,7 +53,7 @@ import javax.swing.event.TreeModelListener
  */
 class CoroutinesDebuggerTree(project: Project) : DebuggerTree(project) {
     private val logger = Logger.getInstance(this::class.java)
-    private var lastSuspendContextCache: Cache? = null
+    var lastSuspendContextCache: Cache? = null
 
     override fun createNodeManager(project: Project): NodeManagerImpl {
         return object : NodeManagerImpl(project, this) {
@@ -380,9 +381,10 @@ class CoroutinesDebuggerTree(project: Project) : DebuggerTree(project) {
         return if (descriptor is StackFrameDescriptor) false else descriptor.isExpandable
     }
 
+    // called on every step/frame
     override fun build(context: DebuggerContextImpl) {
         val session = context.debuggerSession
-        val command = RefreshCoroutinesTreeCommand(session, context.suspendContext)
+        val command = RefreshCoroutinesTreeCommand(session, context.suspendContext, this)
 
         val state = if (session != null) session.state else DebuggerSession.State.DISPOSED
         if (ApplicationManager.getApplication().isUnitTestMode
@@ -394,59 +396,6 @@ class CoroutinesDebuggerTree(project: Project) : DebuggerTree(project) {
             showMessage(if (session != null) session.stateDescription else DebuggerBundle.message("status.debug.stopped"))
         }
     }
-
-    private inner class RefreshCoroutinesTreeCommand(private val mySession: DebuggerSession?, context: SuspendContextImpl?) :
-        SuspendContextCommandImpl(context) {
-
-        override fun contextAction() {
-            val root = nodeFactory.defaultNode
-            mySession ?: return
-            val suspendContext = suspendContext
-            if (suspendContext == null || suspendContext.isResumed) {
-                setRoot(root.apply { add(myNodeManager.createMessageNode("Application is resumed")) })
-                return
-            }
-            val evaluationContext = EvaluationContextImpl(suspendContext, suspendContext.frameProxy)
-            val executionContext = ExecutionContext(evaluationContext, suspendContext.frameProxy ?: return)
-            val cache = lastSuspendContextCache
-            val states = if (cache != null && cache.first.get() === suspendContext) {
-                cache.second
-            } else CoroutinesDebugProbesProxy.dumpCoroutines(executionContext).apply {
-                lastSuspendContextCache = WeakReference(suspendContext) to this
-            }
-            // if suspend context hasn't changed - use last dump, else compute new
-            if (states.isLeft) {
-                logger.warn(states.left)
-                setRoot(root.apply {
-                    clear()
-                    add(nodeFactory.createMessageNode(MessageDescriptor("Dump failed")))
-                })
-                XDebuggerManagerImpl.NOTIFICATION_GROUP
-                    .createNotification(
-                        "Coroutine dump failed. See log",
-                        MessageType.ERROR
-                    ).notify(project)
-                return
-            }
-            for (state in states.get()) {
-                root.add(
-                    nodeFactory.createNode(
-                        nodeFactory.getDescriptor(null, CoroutineData(state)), evaluationContext
-                    )
-                )
-            }
-            setRoot(root)
-        }
-
-        private fun setRoot(root: DebuggerTreeNodeImpl) {
-            DebuggerInvocationUtil.swingInvokeLater(project) {
-                mutableModel.setRoot(root)
-                treeChanged()
-            }
-        }
-
-    }
-
 }
 
 private typealias Cache = Pair<WeakReference<SuspendContextImpl>, Either<Throwable, List<CoroutineState>>>
